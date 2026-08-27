@@ -1,0 +1,109 @@
+#pragma once
+
+#include "core/timer_manager.h"
+#include "render/animation/animation_manager.h"
+#include "shell/dock/dock_geometry.h"
+#include "shell/panel/panel.h"
+
+#include <cstdint>
+#include <functional>
+#include <string>
+
+class Box;
+class BrightnessService;
+class ConfigService;
+class Flex;
+class Glyph;
+class InputArea;
+class Label;
+class Node;
+class PipeWireService;
+class RenderContext;
+class VerticalSlider;
+class WaylandConnection;
+
+class EdgeSliderPanel : public Panel {
+public:
+  EdgeSliderPanel(
+      PipeWireService* audio, BrightnessService* brightness, ConfigService* config,
+      WaylandConnection* wayland, RenderContext* renderContext
+  );
+  ~EdgeSliderPanel() override;
+
+  void create() override;
+  void onOpen(std::string_view context) override;
+  void onClose() override;
+  void onFrameTick(float deltaMs) override;
+
+  [[nodiscard]] float preferredWidth() const override;
+  [[nodiscard]] float preferredHeight() const override;
+  [[nodiscard]] bool isPersistent() const noexcept override { return true; }
+  [[nodiscard]] bool dismissOnOutsideClick() const override { return false; }
+  [[nodiscard]] bool hasDecoration() const override { return false; }
+  [[nodiscard]] LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::None; }
+  [[nodiscard]] PanelPlacement panelPlacement() const noexcept override;
+  [[nodiscard]] std::string panelScreenPosition() const override;
+
+  void onTriggerEnter();
+  void onTriggerLeave();
+  [[nodiscard]] int openRevealDurationMs() const override { return 0; }
+  [[nodiscard]] int closeRevealDurationMs() const override { return 0; }
+  void onSurfaceHoverChanged(bool hovered) override;
+  void onSurfacePointerChanged(bool inside) override;
+
+  void setRequestCloseCallback(std::function<void()> cb) { m_requestClose = std::move(cb); }
+
+private:
+  void doLayout(Renderer& renderer, float width, float height) override;
+  void doUpdate(Renderer& renderer) override;
+
+  void startHideTimer();
+  void syncVolumeFromService();
+  void syncBrightnessFromService();
+  void queueVolume(double value);
+  void queueBrightness(double value);
+
+  // Dock-style slide: reuse dock geometry + animation pattern exactly
+  void syncSlideTransform();
+  void applyBlur();
+  void startReveal();
+  void startHide();
+
+  PipeWireService* m_audio = nullptr;
+  BrightnessService* m_brightness = nullptr;
+  ConfigService* m_config = nullptr;
+  WaylandConnection* m_wayland = nullptr;
+  RenderContext* m_renderContext = nullptr;
+
+  // Scene nodes
+  Node* m_root = nullptr;
+  Node* m_slideRoot = nullptr;
+  Box* m_bgNode = nullptr;
+  Flex* m_contentLayout = nullptr;
+  Glyph* m_volumeIcon = nullptr;
+  VerticalSlider* m_volumeSlider = nullptr;
+  Label* m_volumeLabel = nullptr;
+  Glyph* m_brightnessIcon = nullptr;
+  VerticalSlider* m_brightnessSlider = nullptr;
+  Label* m_brightnessLabel = nullptr;
+
+  // Slide state (mirrors DockInstance pattern)
+  float m_hideOpacity = 0.0F; // 0=hidden, 1=visible
+  AnimationManager::Id m_hideAnimId = 0;
+  float m_slideHiddenDx = 0.0F;
+  shell::dock::DockConcaveShape m_concave{};
+
+  // Hover / interaction
+  bool m_triggerHovered = false;
+  bool m_panelHovered = false;
+  Timer m_hideTimer;
+  static constexpr int kHideDelayMs = 100;
+
+  // Service sync
+  float m_lastSyncedVolume = -1.0F;
+  float m_lastSyncedBrightness = -1.0F;
+  bool m_syncingVolume = false;
+  bool m_syncingBrightness = false;
+
+  std::function<void()> m_requestClose;
+};

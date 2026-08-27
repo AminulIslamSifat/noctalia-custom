@@ -1,0 +1,106 @@
+#pragma once
+
+#include "core/timer_manager.h"
+#include "shell/panel/panel.h"
+
+#include <cstdint>
+#include <functional>
+#include <string>
+
+class Box;
+class BrightnessService;
+class ConfigService;
+class Flex;
+class Glyph;
+class InputArea;
+class Label;
+class Node;
+class PipeWireService;
+class RenderContext;
+class VerticalSlider;
+class WaylandConnection;
+
+class EdgeSliderPanel : public Panel {
+public:
+  EdgeSliderPanel(
+      PipeWireService* audio, BrightnessService* brightness, ConfigService* config,
+      WaylandConnection* wayland, RenderContext* renderContext
+  );
+  ~EdgeSliderPanel() override;
+
+  void create() override;
+  void onOpen(std::string_view context) override;
+  void onClose() override;
+  void onFrameTick(float deltaMs) override;
+
+  [[nodiscard]] float preferredWidth() const override;
+  [[nodiscard]] float preferredHeight() const override;
+  [[nodiscard]] bool isPersistent() const noexcept override { return true; }
+  [[nodiscard]] bool dismissOnOutsideClick() const override { return false; }
+  // Disable default panel decoration — we draw dock-style background ourselves.
+  [[nodiscard]] bool hasDecoration() const override { return false; }
+  [[nodiscard]] LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::None; }
+  [[nodiscard]] PanelPlacement panelPlacement() const noexcept override;
+  [[nodiscard]] std::string panelScreenPosition() const override;
+
+  void onTriggerEnter();
+  void onTriggerLeave();
+  [[nodiscard]] int openRevealDurationMs() const override { return 0; }
+  [[nodiscard]] int closeRevealDurationMs() const override { return 0; }
+  void onSurfaceHoverChanged(bool hovered) override;
+  void onSurfacePointerChanged(bool inside) override;
+
+  void setRequestCloseCallback(std::function<void()> cb) { m_requestClose = std::move(cb); }
+
+private:
+  void doLayout(Renderer& renderer, float width, float height) override;
+  void doUpdate(Renderer& renderer) override;
+
+  void startHideTimer();
+  void syncVolumeFromService();
+  void syncBrightnessFromService();
+  void queueVolume(double value);
+  void queueBrightness(double value);
+
+  // Dock-style slide animation
+  void startSlideIn();
+  void startSlideOut();
+  void applySlideProgress(float progress);
+  void updateBlurForSlide(float progress);
+
+  PipeWireService* m_audio = nullptr;
+  BrightnessService* m_brightness = nullptr;
+  ConfigService* m_config = nullptr;
+  WaylandConnection* m_wayland = nullptr;
+  RenderContext* m_renderContext = nullptr;
+
+  // Scene nodes
+  Flex* m_rootLayout = nullptr;
+  Node* m_slideRoot = nullptr;
+  Box* m_bgNode = nullptr;
+  Glyph* m_volumeIcon = nullptr;
+  VerticalSlider* m_volumeSlider = nullptr;
+  Label* m_volumeLabel = nullptr;
+  Glyph* m_brightnessIcon = nullptr;
+  VerticalSlider* m_brightnessSlider = nullptr;
+  Label* m_brightnessLabel = nullptr;
+
+  // Slide animation state
+  float m_slideProgress = 0.0F; // 0 = hidden (off-screen right), 1 = fully visible
+  std::uint64_t m_slideAnimId = 0;
+  float m_surfaceWidth = 0.0F;
+
+  // Hover / interaction state
+  bool m_triggerHovered = false;
+  bool m_panelHovered = false;
+  Timer m_hideTimer;
+  static constexpr int kHideDelayMs = 100;
+
+  // Service sync
+  float m_lastSyncedVolume = -1.0F;
+  float m_lastSyncedBrightness = -1.0F;
+  bool m_syncingVolume = false;
+  bool m_syncingBrightness = false;
+
+  std::function<void()> m_requestClose;
+};

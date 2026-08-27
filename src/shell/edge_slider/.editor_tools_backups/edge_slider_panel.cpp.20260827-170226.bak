@@ -1,0 +1,394 @@
+#include "shell/edge_slider/edge_slider_panel.h"
+
+#include "config/config_service.h"
+#include "pipewire/pipewire_service.h"
+#include "render/animation/animation_manager.h"
+#include "render/core/render_styles.h"
+#include "render/core/renderer.h"
+#include "render/scene/node.h"
+#include "shell/dock/dock_geometry.h"
+#include "system/brightness_service.h"
+#include "ui/builders.h"
+#include "ui/controls/vertical_slider.h"
+#include "ui/palette.h"
+#include "ui/style.h"
+#include "wayland/surface.h"
+#include "wayland/wayland_connection.h"
+
+#include <algorithm>
+#include <cmath>
+#include <string>
+
+namespace {
+  constexpr float kPanelWidth = 120.0F;
+  constexpr float kPanelHeight = 260.0F;
+  constexpr float kSliderTrackWidth = 6.0F;
+  constexpr float kSliderHeight = 160.0F;
+  constexpr float kIconSize = 20.0F;
+  constexpr float kBlurVisibleOpacity = 0.85F;
+  constexpr float kAutoHideSlideExtraPx = 16.0F;
+}
+
+EdgeSliderPanel::EdgeSliderPanel(
+    PipeWireService* audio, BrightnessService* brightness, ConfigService* config,
+    WaylandConnection* wayland, RenderContext* renderContext
+)
+    : m_audio(audio), m_brightness(brightness), m_config(config), m_wayland(wayland),
+      m_renderContext(renderContext) {}
+
+EdgeSliderPanel::~EdgeSliderPanel() = default;
+
+float EdgeSliderPanel::preferredWidth() const { return scaled(kPanelWidth); }
+float EdgeSliderPanel::preferredHeight() const { return scaled(kPanelHeight); }
+
+PanelPlacement EdgeSliderPanel::panelPlacement() const noexcept { return PanelPlacement::Floating; }
+std::string EdgeSliderPanel::panelScreenPosition() const { return "center_right"; }
+
+void EdgeSliderPanel::create() {
+  const float scale = contentScale();
+
+  // Build a DockConfig-like shape for right-edge concave corners.
+  // Reuse dockConcaveShape by constructing a minimal DockConfig.
+  // Match dock styling exactly: 16px radius, right-edge concave
+  DockConfig dockCfg{};
+  dockCfg.position = DockEdge::Right;
+  dockCfg.concaveEdgeCorners = true;
+  dockCfg.marginEdge = 0;
+  dockCfg.radiusTopLeft = 16;
+  dockCfg.radiusTopRight = 16;
+  dockCfg.radiusBottomRight = 16;
+  dockCfg.radiusBottomLeft = 16;
+  m_concave = shell::dock::dockConcaveShape(dockCfg);
+
+  // Root fills content area; slideRoot translates for hide/reveal.
+  auto root = ui::node({});
+  root->setClipChildren(true);
+
+  auto slide = ui::node({});
+  slide->setParticipatesInLayout(false);
+  slide->setClipChildren(true);
+  m_slideRoot = root->addChild(std::move(slide));
+
+  // Background with concave right-edge corners (exact same pattern as dock buildScene)
+  m_bgNode = static_cast<Box*>(m_slideRoot->addChild(
+      ui::box({
+          .configure = [concave = m_concave](Box& box) {
+            box.setCornerShapes(concave.corners);
+            box.setLogicalInset(concave.logicalInset);
+            box.setRadii(concave.radii);
+            box.setClipChildren(false);
+          },
+      })
+  ));
+  m_bgNode->setZIndex(0);
+  m_bgNode->setFill(colorSpecFromRole(ColorRole::Surface, 0.88F));
+
+  // Content column centered inside slideRoot
+  auto col = ui::column({
+      .align = FlexAlign::Center,
+      .justify = FlexJustify::Center,
+      .gap = Style::spaceLg * scale,
+  });
+  m_contentLayout = col.get();
+  m_contentLayout->setZIndex(1);
+
+  // Two sliders side by side
+  auto row = ui::row({
+      .align = FlexAlign::Center,
+      .justify = FlexJustify::Center,
+      .gap = Style::spaceMd * scale,
+      .fillWidth = true,
+  });
+
+  // Volume column
+  auto volCol = ui::column({.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .flexGrow = 1.0F});
+  volCol->addChild(ui::glyph({
+      .out = &m_volumeIcon, .glyph = "volume", .glyphSize = kIconSize * scale,
+      .color = colorSpecFromRole(ColorRole::OnSurface),
+  }));
+  auto volSlider = std::make_unique<VerticalSlider>();
+  volSlider->setRange(0.0, 1.0);
+  volSlider->setStep(0.01);
+  volSlider->setValue(0.5);
+  volSlider->setTrackWidth(kSliderTrackWidth * scale);
+  volSlider->setThumbSize(Style::sliderThumbSize * scale);
+  volSlider->setControlWidth(Style::controlHeightSm * scale);
+  volSlider->setSize(Style::controlHeightSm * scale, kSliderHeight * scale);
+  volSlider->setOnValueChanged([this](double v) { if (!m_syncingVolume) queueVolume(v); });
+  m_volumeSlider = static_cast<VerticalSlider*>(volCol->addChild(std::move(volSlider)));
+  volCol->addChild(ui::label({
+      .out = &m_volumeLabel, .text = "—",
+      .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+  }));
+  row->addChild(std::move(volCol));
+
+  // Brightness column
+  auto brCol = ui::column({.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .flexGrow = 1.0F});
+  brCol->addChild(ui::glyph({
+      .out = &m_brightnessIcon, .glyph = "brightness-high", .glyphSize = kIconSize * scale,
+      .color = colorSpecFromRole(ColorRole::OnSurface),
+  }));
+  auto brSlider = std::make_unique<VerticalSlider>();
+  brSlider->setRange(0.0, 1.0);
+  brSlider->setStep(0.01);
+  brSlider->setValue(0.5);
+  brSlider->setTrackWidth(kSliderTrackWidth * scale);
+  brSlider->setThumbSize(Style::sliderThumbSize * scale);
+  brSlider->setControlWidth(Style::controlHeightSm * scale);
+  brSlider->setSize(Style::controlHeightSm * scale, kSliderHeight * scale);
+  brSlider->setOnValueChanged([this](double v) { if (!m_syncingBrightness) queueBrightness(v); });
+  m_brightnessSlider = static_cast<VerticalSlider*>(brCol->addChild(std::move(brSlider)));
+  brCol->addChild(ui::label({
+      .out = &m_brightnessLabel, .text = "—",
+      .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+  }));
+  row->addChild(std::move(brCol));
+
+  col->addChild(std::move(row));
+  m_slideRoot->addChild(std::move(col));
+
+  setRoot(std::move(root));
+
+  // Start hidden
+  m_hideOpacity = 0.0F;
+  syncSlideTransform();
+  syncVolumeFromService();
+  syncBrightnessFromService();
+}
+
+void EdgeSliderPanel::onOpen(std::string_view) {
+  syncVolumeFromService();
+  syncBrightnessFromService();
+  startReveal();
+}
+
+void EdgeSliderPanel::onClose() {
+  m_hideTimer.stop();
+  if (m_animations != nullptr && m_hideAnimId != 0) {
+    m_animations->cancel(m_hideAnimId);
+    m_hideAnimId = 0;
+  }
+  if (m_surface != nullptr) {
+    m_surface->clearBlurRegion();
+  }
+  m_slideRoot = nullptr;
+  m_bgNode = nullptr;
+  m_contentLayout = nullptr;
+  m_volumeIcon = nullptr;
+  m_volumeSlider = nullptr;
+  m_volumeLabel = nullptr;
+  m_brightnessIcon = nullptr;
+  m_brightnessSlider = nullptr;
+  m_brightnessLabel = nullptr;
+  m_lastSyncedVolume = -1.0F;
+  m_lastSyncedBrightness = -1.0F;
+  clearReleasedRoot();
+}
+
+void EdgeSliderPanel::doLayout(Renderer& renderer, float width, float height) {
+  // Right-edge slide: hide by translating +x off-screen.
+  // In panel-local coords the panel starts at x=0, so hidden offset is simply
+  // panel width + extra padding (same constant the dock uses).
+  m_slideHiddenDx = width + kAutoHideSlideExtraPx;
+
+  // Root MUST be sized — host doesn't auto-size it when hasDecoration()=false
+  if (m_root != nullptr) {
+    m_root->setSize(width, height);
+  }
+  if (m_contentLayout != nullptr) {
+    m_contentLayout->setSize(width, height);
+    m_contentLayout->layout(renderer);
+  }
+  if (m_bgNode != nullptr) {
+    // Panel-local coords: content at (0,0), bg extends by concave insets
+    const float insetL = m_concave.logicalInset.left;
+    const float insetT = m_concave.logicalInset.top;
+    const float insetR = m_concave.logicalInset.right;
+    const float insetB = m_concave.logicalInset.bottom;
+    m_bgNode->setPosition(-insetL, -insetT);
+    m_bgNode->setSize(width + insetL + insetR, height + insetT + insetB);
+  }
+  if (m_slideRoot != nullptr) {
+    m_slideRoot->setSize(width, height);
+  }
+  syncSlideTransform();
+}
+
+void EdgeSliderPanel::doUpdate(Renderer&) {
+  syncVolumeFromService();
+  syncBrightnessFromService();
+}
+
+void EdgeSliderPanel::onTriggerEnter() {
+  m_triggerHovered = true;
+  m_hideTimer.stop();
+}
+
+void EdgeSliderPanel::onTriggerLeave() {
+  m_triggerHovered = false;
+  startHideTimer();
+}
+
+void EdgeSliderPanel::onSurfaceHoverChanged(bool) {}
+
+void EdgeSliderPanel::onSurfacePointerChanged(bool inside) {
+  m_panelHovered = inside;
+  if (inside) {
+    m_hideTimer.stop();
+  } else if (!m_triggerHovered) {
+    startHideTimer();
+  }
+}
+
+void EdgeSliderPanel::onFrameTick(float deltaMs) {
+  Panel::onFrameTick(deltaMs);
+}
+
+void EdgeSliderPanel::startHideTimer() {
+  m_hideTimer.start(std::chrono::milliseconds(kHideDelayMs), [this]() {
+    if (!m_triggerHovered && !m_panelHovered) {
+      startHide();
+    }
+  });
+}
+
+// --- Slide animation: exact copy of dock reveal/hide pattern ---
+
+void EdgeSliderPanel::syncSlideTransform() {
+  if (m_slideRoot == nullptr) return;
+  // Same formula as syncDockSlideLayerTransform
+  const float t = 1.0F - m_hideOpacity;
+  m_slideRoot->setPosition(m_slideHiddenDx * t, 0.0F);
+}
+
+void EdgeSliderPanel::applyBlur() {
+  if (m_surface == nullptr || m_bgNode == nullptr) return;
+  // Same logic as applyDockCompositorBlur
+  if (m_hideOpacity < kBlurVisibleOpacity) {
+    m_surface->clearBlurRegion();
+    return;
+  }
+  float absX = 0.0F;
+  float absY = 0.0F;
+  Node::absolutePosition(m_bgNode, absX, absY);
+
+  const float insetL = m_concave.logicalInset.left;
+  const float insetT = m_concave.logicalInset.top;
+  const float insetR = m_concave.logicalInset.right;
+  const float insetB = m_concave.logicalInset.bottom;
+  const int px = static_cast<int>(std::lround(absX + insetL));
+  const int py = static_cast<int>(std::lround(absY + insetT));
+  const int pw = static_cast<int>(std::lround(m_bgNode->width() - insetL - insetR));
+  const int ph = static_cast<int>(std::lround(m_bgNode->height() - insetT - insetB));
+  auto strips = Surface::tessellateShape(px, py, pw, ph, m_concave.corners, m_concave.logicalInset, m_concave.radii);
+  m_surface->setBlurRegion(strips);
+}
+
+void EdgeSliderPanel::startReveal() {
+  if (m_animations == nullptr) return;
+  if (m_hideAnimId != 0) {
+    m_animations->cancel(m_hideAnimId);
+    m_hideAnimId = 0;
+  }
+  constexpr float kSettledThreshold = 0.999F;
+  const float current = m_hideOpacity;
+  if (current >= kSettledThreshold) {
+    applyBlur();
+    if (m_surface != nullptr) m_surface->requestRedraw();
+    return;
+  }
+  // Exact same animation as revealAutoHideDock
+  m_hideAnimId = m_animations->animate(
+      current, 1.0F, Style::animNormal, Easing::EaseOutCubic,
+      [this](float v) {
+        m_hideOpacity = v;
+        syncSlideTransform();
+        applyBlur();
+        if (m_surface != nullptr) m_surface->requestRedraw();
+      },
+      [this]() { m_hideAnimId = 0; }
+  );
+  if (m_surface != nullptr) m_surface->requestRedraw();
+}
+
+void EdgeSliderPanel::startHide() {
+  if (m_animations == nullptr) return;
+  if (m_hideAnimId != 0) {
+    m_animations->cancel(m_hideAnimId);
+    m_hideAnimId = 0;
+  }
+  const float current = m_hideOpacity;
+  // Exact same animation as startHideFadeOut
+  m_hideAnimId = m_animations->animate(
+      current, 0.0F, Style::animNormal, Easing::EaseInQuad,
+      [this](float v) {
+        m_hideOpacity = v;
+        syncSlideTransform();
+        applyBlur();
+        if (m_surface != nullptr) m_surface->requestRedraw();
+      },
+      [this]() {
+        m_hideAnimId = 0;
+        if (m_requestClose) m_requestClose();
+      }
+  );
+  if (m_surface != nullptr) m_surface->requestRedraw();
+}
+
+// --- Service sync ---
+
+void EdgeSliderPanel::syncVolumeFromService() {
+  if (m_audio == nullptr || m_volumeSlider == nullptr) return;
+  const auto* sink = m_audio->defaultSink();
+  if (sink == nullptr) return;
+  const float vol = sink->volume;
+  if (std::abs(vol - m_lastSyncedVolume) < 0.005F) return;
+  m_lastSyncedVolume = vol;
+  m_syncingVolume = true;
+  m_volumeSlider->setValue(static_cast<double>(vol));
+  m_syncingVolume = false;
+  if (m_volumeLabel != nullptr)
+    m_volumeLabel->setText(std::to_string(static_cast<int>(std::round(vol * 100.0F))) + "%");
+  if (m_volumeIcon != nullptr) {
+    if (sink->muted || vol <= 0.0F) m_volumeIcon->setGlyph("volume-off");
+    else if (vol < 0.5F) m_volumeIcon->setGlyph("volume-low");
+    else m_volumeIcon->setGlyph("volume");
+  }
+}
+
+void EdgeSliderPanel::syncBrightnessFromService() {
+  if (m_brightness == nullptr || m_brightnessSlider == nullptr) return;
+  const auto& displays = m_brightness->displays();
+  if (displays.empty()) return;
+  const BrightnessDisplay* target = nullptr;
+  for (const auto& d : displays) {
+    if (d.controllable) { target = &d; break; }
+  }
+  if (target == nullptr) return;
+  const float bright = target->brightness;
+  if (std::abs(bright - m_lastSyncedBrightness) < 0.005F) return;
+  m_lastSyncedBrightness = bright;
+  m_syncingBrightness = true;
+  m_brightnessSlider->setValue(static_cast<double>(bright));
+  m_syncingBrightness = false;
+  if (m_brightnessLabel != nullptr)
+    m_brightnessLabel->setText(std::to_string(static_cast<int>(std::round(bright * 100.0F))) + "%");
+}
+
+void EdgeSliderPanel::queueVolume(double value) {
+  if (m_audio == nullptr) return;
+  const float vol = static_cast<float>(std::clamp(value, 0.0, 1.0));
+  m_audio->setVolume(vol);
+  m_lastSyncedVolume = vol;
+  if (m_volumeLabel != nullptr)
+    m_volumeLabel->setText(std::to_string(static_cast<int>(std::round(vol * 100.0F))) + "%");
+}
+
+void EdgeSliderPanel::queueBrightness(double value) {
+  if (m_brightness == nullptr) return;
+  const float bright = static_cast<float>(std::clamp(value, 0.0, 1.0));
+  m_brightness->setAllBrightness(bright);
+  m_lastSyncedBrightness = bright;
+  if (m_brightnessLabel != nullptr)
+    m_brightnessLabel->setText(std::to_string(static_cast<int>(std::round(bright * 100.0F))) + "%");
+}
