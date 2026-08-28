@@ -11,8 +11,10 @@
 #include "render/core/async_texture_cache.h"
 #include "render/core/renderer.h"
 #include "render/scene/node.h"
+#include "shell/dock/dock_geometry.h"
 #include "shell/dock/pinned_apps.h"
 #include "shell/panel/panel_manager.h"
+#include "wayland/surface.h"
 #include "system/desktop_entry.h"
 #include "ui/app_icon_colorization.h"
 #include "ui/builders.h"
@@ -59,9 +61,10 @@ namespace {
       return 0.0;
     }
 
-    // For typed searches, usage should nudge close matches without letting a
-    // weak fuzzy hit outrank a much stronger lexical match.
-    return std::min(rawBoost, kTypedUsageScoreCap);
+    // Scale usage boost relative to the match score so frequently launched apps
+    // float to the top even during search.  A cap of 25% of the absolute score
+    // keeps a barely-matching-but-popular entry from beating a perfect lexical hit.
+    return std::min(rawBoost, std::abs(score) * 0.25);
   }
 
   [[nodiscard]] bool isDescendantOf(const Node* node, const Node* ancestor) {
@@ -1057,11 +1060,48 @@ void LauncherPanel::setScopedProvider(std::string_view providerId, std::string_v
 void LauncherPanel::create() {
   m_launcherRowHeight = 0.0F;
   const float scale = contentScale();
+
+  // Bottom-edge concave shape — mirrors dock bottom-edge pattern.
+  // Concave corners at bl/br so the panel looks carved into the bottom bar.
+  constexpr float kRadius = 16.0F;
+  const float cap = std::ceil(scaled(560.0F) * 0.5F);
+  const float inset = std::ceil(std::min(cap, kRadius));
+  m_concave = shell::dock::DockConcaveShape{
+      .corners = {
+          .tl = CornerShape::Convex,
+          .tr = CornerShape::Convex,
+          .br = CornerShape::Concave,
+          .bl = CornerShape::Concave,
+      },
+      .radii = {kRadius, kRadius, kRadius, kRadius},
+      .logicalInset = {inset, 0.0F, inset, 0.0F},
+  };
+
+  // Root node — no clip so concave bg extends beyond content bounds
+  auto root = ui::node({});
+  root->setClipChildren(false);
+
+  // Background with concave bottom-edge corners
+  m_bgNode = static_cast<Box*>(root->addChild(
+      ui::box({
+          .configure = [concave = m_concave, opacity = panelCardOpacity()](Box& box) {
+            box.setCornerShapes(concave.corners);
+            box.setLogicalInset(concave.logicalInset);
+            box.setRadii(concave.radii);
+            box.setFill(colorSpecFromRole(ColorRole::Surface, opacity));
+            box.setClipChildren(false);
+          },
+      })
+  ));
+  m_bgNode->setZIndex(0);
+
+  // Content column sits inside root, offset by logical inset
   auto container = ui::column({
       .out = &m_container,
       .align = FlexAlign::Stretch,
       .gap = Style::spaceSm * scale,
   });
+  container->setZIndex(1);
 
   container->addChild(
       ui::input({
@@ -1206,10 +1246,12 @@ void LauncherPanel::create() {
 
   container->addChild(std::move(body));
 
-  setRoot(std::move(container));
+  // Add content container to the concave root
+  root->addChild(std::move(container));
+  setRoot(std::move(root));
 
   if (m_animations != nullptr) {
-    root()->setAnimationManager(m_animations);
+    this->root()->setAnimationManager(m_animations);
   }
 
   m_appIconColorizeConn = shellAppIconColorizationChanged().connect([this]() { refreshLauncherAppIconColorization(); });
@@ -1294,6 +1336,10 @@ void LauncherPanel::syncLauncherViewLayout(Renderer* renderer) {
     }
     m_grid->notifyDataChanged();
   }
+
+  if (auto* manager = PanelManager::current(); manager != nullptr && manager->isOpenPanel("launcher")) {
+    manager->relayoutActivePanelPreferredSize();
+  }
 }
 
 void LauncherPanel::syncLauncherListStyle() {
@@ -1355,6 +1401,55 @@ void LauncherPanel::onPanelCardOpacityChanged(float opacity) {
   if (m_detailScroll != nullptr) {
     m_detailScroll->setCardStyle(contentScale(), opacity);
   }
+  if (m_bgNode != nullptr) {
+    m_bgNode->setFill(colorSpecFromRole(ColorRole::Surface, opacity));
+  }
+  applyConcaveBlur();
+}
+
+float LauncherPanel::preferredWidth() const {
+  constexpr float kContentWidth = 560.0F;
+  const float pad = scaled(Style::panelPadding) * 2.0F;
+  const float inset = m_concave.logicalInset.left + m_concave.logicalInset.right;
+  return scaled(kContentWidth) + pad + inset;
+}
+
+float LauncherPanel::preferredHeight() const {
+  constexpr float kMaxHeight = 500.0F;
+  // Before first layout or with no results, use full height so the open
+  // animation has room and the panel doesn't pop in at a tiny size.
+  const float pad = scaled(Style::panelPadding) * 2.0F;
+  if (m_launcherRowHeight <= 0.0F || m_results.empty()) {
+    return scaled(kMaxHeight) + pad;
+  }
+
+  const float scale = contentScale();
+  const float inputH = (Style::controlHeight + Style::spaceSm) * scale;
+  const float categoryH = Style::spaceSm * scale;
+  constexpr std::size_t kMinVisibleRows = 3;
+  const std::size_t visibleRows = std::clamp(m_results.size(), kMinVisibleRows, static_cast<std::size_t>(10));
+  const float contentH = inputH + categoryH + static_cast<float>(visibleRows) * m_launcherRowHeight;
+  return scaled(std::min(contentH / scale, kMaxHeight)) + pad;
+}
+
+void LauncherPanel::applyConcaveBlur() {
+  if (m_surface == nullptr || m_bgNode == nullptr) {
+    return;
+  }
+  float absX = 0.0F;
+  float absY = 0.0F;
+  Node::absolutePosition(m_bgNode, absX, absY);
+
+  const float insetL = m_concave.logicalInset.left;
+  const float insetT = m_concave.logicalInset.top;
+  const float insetR = m_concave.logicalInset.right;
+  const float insetB = m_concave.logicalInset.bottom;
+  const int px = static_cast<int>(std::lround(absX + insetL));
+  const int py = static_cast<int>(std::lround(absY + insetT));
+  const int pw = static_cast<int>(std::lround(m_bgNode->width() - insetL - insetR));
+  const int ph = static_cast<int>(std::lround(m_bgNode->height() - insetT - insetB));
+  auto strips = Surface::tessellateShape(px, py, pw, ph, m_concave.corners, m_concave.logicalInset, m_concave.radii);
+  m_surface->setBlurRegion(strips);
 }
 
 void LauncherPanel::doLayout(Renderer& renderer, float width, float height) {
@@ -1366,9 +1461,23 @@ void LauncherPanel::doLayout(Renderer& renderer, float width, float height) {
   syncLauncherViewLayout(&renderer);
   updateLauncherGridMetrics(renderer);
 
-  m_container->setSize(width, height);
+  // Bg fills entire surface — concave corners render at bl/br of this box
+  if (m_bgNode != nullptr) {
+    m_bgNode->setPosition(0.0F, 0.0F);
+    m_bgNode->setSize(width, height);
+  }
+
+  // Offset content inward: concave inset on left/right + panel padding on all sides
+  const float pad = scaled(Style::panelPadding);
+  const float insetL = m_concave.logicalInset.left + pad;
+  const float insetR = m_concave.logicalInset.right + pad;
+  const float insetT = pad;
+  const float insetB = pad;
+  m_container->setPosition(insetL, insetT);
+  m_container->setSize(width - insetL - insetR, height - insetT - insetB);
   m_container->layout(renderer);
 
+  applyConcaveBlur();
 }
 
 void LauncherPanel::onOpen(std::string_view context) {
@@ -1406,6 +1515,9 @@ void LauncherPanel::onOpen(std::string_view context) {
 }
 
 void LauncherPanel::onClose() {
+  if (m_surface != nullptr) {
+    m_surface->clearBlurRegion();
+  }
   if (m_actionsMenu != nullptr && m_actionsMenu->isOpen()) {
     m_actionsMenu->close();
   }

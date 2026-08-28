@@ -599,6 +599,9 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   const bool isLeft = barConfig.position == "left";
   const bool isRight = barConfig.position == "right";
   const std::int32_t panelGap = m_config->config().shell.panel.floatingOffset;
+  // Flush-edge panels (concave corners on the anchored edge) get zero gap so
+  // the concave feet stay visually connected to the bar/screen edge.
+  const std::int32_t edgeGap = (m_activePanel != nullptr && m_activePanel->wantsEdgeFlush()) ? 0 : panelGap;
   const auto screenPadding = static_cast<std::int32_t>(Style::spaceSm);
 
   std::int32_t resolvedOutputWidth = 0;
@@ -698,7 +701,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
 
     if (useScreenPosition) {
       // Pinned to a screen edge/corner, independent of the bar.
-      const auto sp = shell::screenPositionAnchor(panelPosition, panelGap);
+      const auto sp = shell::screenPositionAnchor(panelPosition, edgeGap);
       standaloneAnchor = sp.anchor;
       standaloneMarginTop = sp.marginTop;
       standaloneMarginRight = sp.marginRight;
@@ -707,44 +710,44 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     } else if (useReservedEdgePlacement) {
       if (isLeft) {
         standaloneAnchor = LayerShellAnchor::Left | LayerShellAnchor::Top;
-        standaloneMarginLeft = panelGap;
+        standaloneMarginLeft = edgeGap;
         standaloneMarginTop = useFloatingAnchor ? marginTopFromAnchor : centeredAlongBarY;
       } else if (isRight) {
         standaloneAnchor = LayerShellAnchor::Right | LayerShellAnchor::Top;
-        standaloneMarginRight = panelGap;
+        standaloneMarginRight = edgeGap;
         standaloneMarginTop = useFloatingAnchor ? marginTopFromAnchor : centeredAlongBarY;
       } else if (isBottom) {
         standaloneAnchor = LayerShellAnchor::Bottom | LayerShellAnchor::Left;
-        standaloneMarginBottom = panelGap;
+        standaloneMarginBottom = edgeGap;
         standaloneMarginLeft = useFloatingAnchor ? marginLeftFromAnchor : centeredAlongBarX;
       } else {
         standaloneAnchor = LayerShellAnchor::Top | LayerShellAnchor::Left;
-        standaloneMarginTop = panelGap;
+        standaloneMarginTop = edgeGap;
         standaloneMarginLeft = useFloatingAnchor ? marginLeftFromAnchor : centeredAlongBarX;
       }
     } else {
       standaloneAnchor = LayerShellAnchor::Top | LayerShellAnchor::Left;
       if (isLeft) {
         standaloneMarginLeft = clampMargin(
-            static_cast<float>(barRect.right + panelGap), static_cast<std::int32_t>(panelWidth), outputWidth,
+            static_cast<float>(barRect.right + edgeGap), static_cast<std::int32_t>(panelWidth), outputWidth,
             screenPadding
         );
         standaloneMarginTop = useFloatingAnchor ? marginTopFromAnchor : centeredAlongBarY;
       } else if (isRight) {
         standaloneMarginLeft = clampMargin(
-            static_cast<float>(barRect.left - static_cast<std::int32_t>(panelWidth) - panelGap),
+            static_cast<float>(barRect.left - static_cast<std::int32_t>(panelWidth) - edgeGap),
             static_cast<std::int32_t>(panelWidth), outputWidth, screenPadding
         );
         standaloneMarginTop = useFloatingAnchor ? marginTopFromAnchor : centeredAlongBarY;
       } else if (isBottom) {
         standaloneMarginTop = clampMargin(
-            static_cast<float>(barRect.top - static_cast<std::int32_t>(panelHeight) - panelGap),
+            static_cast<float>(barRect.top - static_cast<std::int32_t>(panelHeight) - edgeGap),
             static_cast<std::int32_t>(panelHeight), outputHeight, screenPadding
         );
         standaloneMarginLeft = useFloatingAnchor ? marginLeftFromAnchor : centeredAlongBarX;
       } else {
         standaloneMarginTop = clampMargin(
-            static_cast<float>(barRect.bottom + panelGap), static_cast<std::int32_t>(panelHeight), outputHeight,
+            static_cast<float>(barRect.bottom + edgeGap), static_cast<std::int32_t>(panelHeight), outputHeight,
             screenPadding
         );
         standaloneMarginLeft = useFloatingAnchor ? marginLeftFromAnchor : centeredAlongBarX;
@@ -2096,11 +2099,15 @@ void PanelManager::applyDetachedReveal(float progress) {
   if (m_contentNode != nullptr) {
     m_contentNode->setOpacity(panelRevealContentOpacity(m_detachedRevealProgress));
   }
-  applyPanelCompositorBlur(
-      m_panelInsetX, m_panelInsetY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight),
-      static_cast<int>(std::lround(clipX)), static_cast<int>(std::lround(clipY)), static_cast<int>(std::lround(clipW)),
-      static_cast<int>(std::lround(clipH))
-  );
+  // Panels with hasDecoration()==false manage their own blur region (e.g. concave shapes).
+  // Skip the panel manager's rectangular blur to avoid overwriting the panel's custom shape.
+  if (m_activePanel == nullptr || m_activePanel->hasDecoration()) {
+    applyPanelCompositorBlur(
+        m_panelInsetX, m_panelInsetY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight),
+        static_cast<int>(std::lround(clipX)), static_cast<int>(std::lround(clipY)), static_cast<int>(std::lround(clipW)),
+        static_cast<int>(std::lround(clipH))
+    );
+  }
 }
 
 void PanelManager::startAttachedOpenAnimation() {

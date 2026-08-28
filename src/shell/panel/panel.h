@@ -67,6 +67,10 @@ public:
   [[nodiscard]] virtual bool fillsWidth() const noexcept { return false; }
   [[nodiscard]] virtual bool fillsHeight() const noexcept { return false; }
   [[nodiscard]] virtual bool hasDecoration() const { return true; }
+  // Panels that draw concave corners on their anchored edge (e.g. a launcher
+  // carved into the bottom edge) must sit flush against that edge — the
+  // floating gap would visually detach the concave feet.
+  [[nodiscard]] virtual bool wantsEdgeFlush() const noexcept { return false; }
   [[nodiscard]] virtual LayerShellLayer layer() const { return LayerShellLayer::Top; }
   // Keyboard focus policy. `None` means the panel never takes keyboard focus, so the
   // app the user is typing into keeps it — that also rules out outside-click

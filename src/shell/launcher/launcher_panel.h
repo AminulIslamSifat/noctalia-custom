@@ -2,6 +2,7 @@
 
 #include "launcher/launcher_provider.h"
 #include "launcher/usage_tracker.h"
+#include "shell/dock/dock_geometry.h"
 #include "shell/panel/panel.h"
 #include "system/icon_resolver.h"
 #include "ui/signal.h"
@@ -55,13 +56,14 @@ public:
   // supports auto-paste. The host schedules virtual-keyboard paste (clipboard path).
   void setCopiedActivationCallback(std::function<void()> callback) { m_onCopiedActivation = std::move(callback); }
 
-  [[nodiscard]] float preferredWidth() const override { return scaled(560.0F); }
-  [[nodiscard]] float preferredHeight() const override { return scaled(500.0F); }
+  [[nodiscard]] float preferredWidth() const override;
+  [[nodiscard]] float preferredHeight() const override;
   [[nodiscard]] LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::Exclusive; }
   [[nodiscard]] InputArea* initialFocusArea() const override;
   [[nodiscard]] bool handleGlobalKey(std::uint32_t sym, std::uint32_t modifiers, bool pressed, bool preedit) override;
   [[nodiscard]] PanelPlacement panelPlacement() const noexcept override;
-
+  [[nodiscard]] bool hasDecoration() const override { return false; }
+  [[nodiscard]] bool wantsEdgeFlush() const noexcept override { return true; }
 
 private:
   enum ActiveCategoryType { All, RecentlyUsed, Category };
@@ -154,4 +156,9 @@ private:
 
   void triggerReflowTransition();
   void completeReflowTransition();
+
+  // Bottom-edge concave background (same pattern as EdgeSliderPanel / Dock)
+  void applyConcaveBlur();
+  shell::dock::DockConcaveShape m_concave{};
+  Box* m_bgNode = nullptr;
 };
