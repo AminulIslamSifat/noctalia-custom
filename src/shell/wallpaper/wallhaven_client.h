@@ -1,11 +1,11 @@
 #pragma once
 
+#include "net/http_client.h"
+
 #include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
-
-class HttpClient;
 
 namespace wallhaven {
 

@@ -27,6 +27,7 @@
 #include "wayland/wayland_connection.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
@@ -1920,6 +1921,12 @@ void WallpaperPanel::applyWallpaperFromEntry(const WallpaperEntry& entry) {
     return;
   }
 
+  // In Wallhaven mode, entries have URLs not local paths — download first
+  if (m_sourceMode == SourceMode::Wallhaven) {
+    wallhavenDownloadAndApply(entry);
+    return;
+  }
+
   const std::string path = entry.absPath.string();
   applyWallpaperPath(path, favoriteThemeToApply(path));
   kLog.info(
@@ -1952,4 +1959,294 @@ void WallpaperPanel::applyColorWallpaper() {
     syncBrowseChrome();
     kLog.info("applied color wallpaper {}", colorWallpaperPath(rgb));
   });
+}
+
+// ── Wallhaven implementation ───────────────────────────────────────────────
+
+void WallpaperPanel::switchSource(SourceMode mode) {
+  m_sourceMode = mode;
+  syncWallhavenChrome();
+
+  if (mode == SourceMode::Wallhaven) {
+    // Show Wallhaven controls, hide local-only ones
+    if (m_filterInput != nullptr) m_filterInput->setVisible(false);
+    if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(false);
+    if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(false);
+    if (m_backButton != nullptr) m_backButton->setVisible(false);
+    if (m_sortButton != nullptr) m_sortButton->setVisible(false);
+
+    // Auto-search on first switch if empty
+    if (m_wallhavenEntries.empty() && !m_wallhavenSearching) {
+      wallhavenSearch();
+    } else {
+      // Use cached results
+      m_visibleEntries = m_wallhavenEntries;
+      rebindGrid(true);
+    }
+  } else {
+    // Restore local controls
+    if (m_filterInput != nullptr) m_filterInput->setVisible(true);
+    if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(true);
+    if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(true);
+    if (m_backButton != nullptr) m_backButton->setVisible(true);
+    if (m_sortButton != nullptr) m_sortButton->setVisible(true);
+
+    refreshVisibleEntries();
+    resetSelection();
+    rebindGrid();
+  }
+
+  syncBrowseChrome();
+  m_dirty = true;
+  PanelManager::instance().refresh();
+}
+
+void WallpaperPanel::wallhavenSearch() {
+  if (m_wallhavenClient == nullptr || m_wallhavenSearching) {
+    return;
+  }
+
+  m_wallhavenSearching = true;
+  m_wallhavenPage = 1;
+  wallhavenLoadPage(1);
+}
+
+void WallpaperPanel::wallhavenLoadPage(std::size_t page) {
+  if (m_wallhavenClient == nullptr) {
+    return;
+  }
+
+  m_wallhavenSearching = true;
+  m_wallhavenPage = page;
+
+  // Update page label to show loading
+  if (m_wallhavenPageLabel != nullptr) {
+    m_wallhavenPageLabel->setText("Loading…");
+  }
+
+  wallhaven::SearchParams params;
+  params.query = m_wallhavenQuery;
+  params.sorting = m_wallhavenSorting;
+  params.page = page;
+  params.categories = 0b111; // all categories
+  params.purity = 0b001;     // SFW only by default
+
+  kLog.info("Wallhaven search: q='{}' sorting={} page={}", params.query,
+            static_cast<int>(params.sorting), params.page);
+
+  m_wallhavenClient->search(params, [this](wallhaven::SearchResponse response) {
+    m_wallhavenSearching = false;
+
+    if (!response.ok) {
+      kLog.error("Wallhaven search failed: {}", response.error);
+      if (m_wallhavenPageLabel != nullptr) {
+        m_wallhavenPageLabel->setText("Error");
+      }
+      m_dirty = true;
+      PanelManager::instance().refresh();
+      return;
+    }
+
+    m_wallhavenResults = std::move(response.results);
+    m_wallhavenLastPage = response.lastPage;
+
+    // Update pagination label
+    if (m_wallhavenPageLabel != nullptr) {
+      m_wallhavenPageLabel->setText(
+          std::to_string(response.currentPage) + " / " + std::to_string(response.lastPage)
+      );
+    }
+
+    // Download thumbnails to local cache so ThumbnailService can display them.
+    // Each thumb is small (~30KB), so parallel downloads are fine.
+    const std::filesystem::path thumbCacheDir =
+        std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp")
+        / ".cache" / "noctalia" / "wallhaven" / "thumbs";
+    std::error_code ec;
+    std::filesystem::create_directories(thumbCacheDir, ec);
+
+    // Build entries with placeholder paths first, then update as thumbs arrive
+    m_wallhavenEntries.clear();
+    m_wallhavenEntries.reserve(m_wallhavenResults.size());
+
+    auto pendingCount = std::make_shared<std::atomic<std::size_t>>(m_wallhavenResults.size());
+    const std::size_t resultCount = m_wallhavenResults.size();
+
+    for (std::size_t i = 0; i < resultCount; ++i) {
+      const auto& sr = m_wallhavenResults[i];
+      const std::filesystem::path cachedThumb = thumbCacheDir / (sr.id + ".jpg");
+
+      WallpaperEntry entry;
+      entry.name = sr.id + " (" + sr.resolution + ")";
+      entry.absPath = cachedThumb; // Will point to local cached file
+      entry.isDir = false;
+      entry.modifiedTime = 0;
+      entry.fileSize = sr.fileSize;
+      m_wallhavenEntries.push_back(std::move(entry));
+
+      // Check if already cached
+      if (std::filesystem::exists(cachedThumb, ec)) {
+        if (pendingCount->fetch_sub(1) == 1) {
+          // All done
+          m_visibleEntries = m_wallhavenEntries;
+          syncWallhavenChrome();
+          resetSelection();
+          rebindGrid(true);
+          m_dirty = true;
+          PanelManager::instance().refresh();
+        }
+        continue;
+      }
+
+      // Download thumbnail
+      m_wallhavenClient->downloadWallpaper(sr.thumbUrl, cachedThumb,
+          [this, pendingCount](bool success) {
+        if (!success) {
+          kLog.warn("Wallhaven: failed to download thumbnail");
+        }
+        if (pendingCount->fetch_sub(1) == 1) {
+          // All thumbnails downloaded — show results
+          m_visibleEntries = m_wallhavenEntries;
+          syncWallhavenChrome();
+          resetSelection();
+          rebindGrid(true);
+          m_dirty = true;
+          PanelManager::instance().refresh();
+          kLog.info("Wallhaven: all thumbnails cached, showing {} results",
+                    m_wallhavenEntries.size());
+        }
+      });
+    }
+
+    // Handle empty results
+    if (resultCount == 0) {
+      m_visibleEntries.clear();
+      syncWallhavenChrome();
+      resetSelection();
+      rebindGrid(true);
+      m_dirty = true;
+      PanelManager::instance().refresh();
+    }
+
+    kLog.info("Wallhaven: {} results, page {}/{}, downloading thumbnails...",
+              resultCount, response.currentPage, response.lastPage);
+  });
+}
+
+void WallpaperPanel::wallhavenDownloadAndApply(const WallpaperEntry& entry) {
+  if (m_wallhavenClient == nullptr || m_config == nullptr) {
+    return;
+  }
+
+  // Find the matching SearchResult by ID (entry name format: "ID (resolution)")
+  const std::string entryId = entry.name.substr(0, entry.name.find(' '));
+  const wallhaven::SearchResult* match = nullptr;
+  for (const auto& sr : m_wallhavenResults) {
+    if (sr.id == entryId) {
+      match = &sr;
+      break;
+    }
+  }
+
+  if (match == nullptr || match->fullUrl.empty()) {
+    kLog.error("Wallhaven: no full URL found for entry {}", entry.name);
+    return;
+  }
+
+  // Determine save path
+  const std::filesystem::path saveDir = wallhavenSaveDirectory();
+  std::error_code ec;
+  std::filesystem::create_directories(saveDir, ec);
+
+  // Extract filename from URL
+  std::string filename = match->id + ".jpg";
+  if (match->fileType.contains("png")) {
+    filename = match->id + ".png";
+  } else if (match->fileType.contains("webp")) {
+    filename = match->id + ".webp";
+  }
+
+  const std::filesystem::path destPath = saveDir / filename;
+
+  kLog.info("Wallhaven downloading {} -> {}", match->fullUrl, destPath.string());
+
+  // Show loading state
+  if (m_wallhavenPageLabel != nullptr) {
+    m_wallhavenPageLabel->setText("Downloading…");
+  }
+
+  m_wallhavenClient->downloadWallpaper(match->fullUrl, destPath,
+      [this, destPath, filename](bool success) {
+    if (!success) {
+      kLog.error("Wallhaven download failed for {}", filename);
+      if (m_wallhavenPageLabel != nullptr) {
+        m_wallhavenPageLabel->setText("Download failed");
+      }
+      m_dirty = true;
+      PanelManager::instance().refresh();
+      return;
+    }
+
+    kLog.info("Wallhaven downloaded {} successfully", destPath.string());
+
+    // Apply the wallpaper
+    applyWallpaperPath(destPath.string(), nullptr);
+
+    // Refresh scanner so the new file appears in local mode too
+    if (m_scanner != nullptr) {
+      m_scanner->invalidate();
+    }
+
+    // Restore page label
+    syncWallhavenChrome();
+    m_dirty = true;
+    PanelManager::instance().refresh();
+  });
+}
+
+void WallpaperPanel::syncWallhavenChrome() {
+  const bool isWallhaven = (m_sourceMode == SourceMode::Wallhaven);
+
+  // Toggle Wallhaven-specific controls
+  if (m_wallhavenSearchInput != nullptr) m_wallhavenSearchInput->setVisible(isWallhaven);
+  if (m_wallhavenSearchButton != nullptr) m_wallhavenSearchButton->setVisible(isWallhaven);
+  if (m_wallhavenSortSelect != nullptr) m_wallhavenSortSelect->setVisible(isWallhaven);
+  if (m_wallhavenPrevButton != nullptr) m_wallhavenPrevButton->setVisible(isWallhaven);
+  if (m_wallhavenPageLabel != nullptr) m_wallhavenPageLabel->setVisible(isWallhaven);
+  if (m_wallhavenNextButton != nullptr) m_wallhavenNextButton->setVisible(isWallhaven);
+
+  // Update pagination button states
+  if (m_wallhavenPrevButton != nullptr) {
+    m_wallhavenPrevButton->setEnabled(m_wallhavenPage > 1 && !m_wallhavenSearching);
+  }
+  if (m_wallhavenNextButton != nullptr) {
+    m_wallhavenNextButton->setEnabled(m_wallhavenPage < m_wallhavenLastPage && !m_wallhavenSearching);
+  }
+
+  // Hide local-only controls in Wallhaven mode
+  if (isWallhaven) {
+    if (m_filterInput != nullptr) m_filterInput->setVisible(false);
+    if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(false);
+    if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(false);
+    if (m_backButton != nullptr) m_backButton->setVisible(false);
+    if (m_sortButton != nullptr) m_sortButton->setVisible(false);
+  } else {
+    if (m_filterInput != nullptr) m_filterInput->setVisible(true);
+    if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(true);
+    if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(true);
+    if (m_backButton != nullptr) m_backButton->setVisible(true);
+    if (m_sortButton != nullptr) m_sortButton->setVisible(true);
+  }
+}
+
+std::filesystem::path WallpaperPanel::wallhavenSaveDirectory() const {
+  // Use the same directory resolution as local wallpaper browsing
+  const auto rootDir = rootDirectoryForSelection();
+  if (!rootDir.empty()) {
+    return rootDir;
+  }
+  // Fallback
+  return std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") / "Pictures" / "Wallpapers";
+}
+
 }
