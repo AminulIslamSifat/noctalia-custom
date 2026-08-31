@@ -160,6 +160,8 @@ private:
   Button* m_colorButton = nullptr;
   Button* m_closeButton = nullptr;
   Select* m_sourceSelect = nullptr;
+  Flex* m_wallhavenControlsRow = nullptr;
+  Flex* m_localControlsRow = nullptr;
   Input* m_wallhavenSearchInput = nullptr;
   Select* m_wallhavenSortSelect = nullptr;
   Button* m_wallhavenSearchButton = nullptr;

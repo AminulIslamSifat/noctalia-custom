@@ -353,6 +353,19 @@ public:
     m_onActivate((*m_entries)[index]);
   }
 
+  // Find the visible tile currently bound to a specific entry (by absPath match).
+  [[nodiscard]] WallpaperTile* findTileForEntry(const WallpaperEntry& entry) const {
+    for (WallpaperTile* tile : m_pool) {
+      if (tile != nullptr && tile->visible()) {
+        const auto* e = tile->entry();
+        if (e != nullptr && e->absPath == entry.absPath && e->name == entry.name) {
+          return tile;
+        }
+      }
+    }
+    return nullptr;
+  }
+
 private:
   float m_scale;
   const std::vector<WallpaperEntry>* m_entries = nullptr;
@@ -440,8 +453,15 @@ void WallpaperPanel::create() {
     m_sourceSelect->setSelectedIndex(0);
   }
 
-  // ── Wallhaven search bar (hidden in Local mode) ─────────────────────
-  toolbar->addChild(
+  // ── Wallhaven controls sub-row (collapsed when hidden) ──────────────
+  auto wallhavenRow = ui::row({
+      .out = &m_wallhavenControlsRow,
+      .align = FlexAlign::Center,
+      .gap = Style::spaceSm * scale,
+      .visible = false,
+  });
+
+  wallhavenRow->addChild(
       ui::input({
           .out = &m_wallhavenSearchInput,
           .placeholder = "Search Wallhaven…",
@@ -451,7 +471,6 @@ void WallpaperPanel::create() {
           .surfaceOpacity = panelCardOpacity(),
           .width = 200.0F * scale,
           .height = 0.0F,
-          .visible = false,
           .onChange = [this](const std::string& text) { m_wallhavenQuery = text; },
           .onKeyEvent =
               [this](std::uint32_t sym, std::uint32_t modifiers) {
@@ -464,7 +483,7 @@ void WallpaperPanel::create() {
       })
   );
 
-  toolbar->addChild(
+  wallhavenRow->addChild(
       ui::button({
           .out = &m_wallhavenSearchButton,
           .glyph = "search",
@@ -474,18 +493,16 @@ void WallpaperPanel::create() {
           .minHeight = Style::controlHeightSm * scale,
           .padding = Style::spaceXs * scale,
           .radius = Style::scaledRadiusMd(scale),
-          .visible = false,
           .onClick = [this]() { wallhavenSearch(); },
       })
   );
 
-  toolbar->addChild(
+  wallhavenRow->addChild(
       ui::select({
           .out = &m_wallhavenSortSelect,
           .fontSize = Style::fontSizeBody * scale,
           .controlHeight = Style::controlHeightSm * scale,
           .surfaceOpacity = panelCardOpacity(),
-          .visible = false,
           .onSelectionChanged =
               [this](std::size_t idx, std::string_view) {
                 static constexpr wallhaven::Sorting kSortings[] = {
@@ -505,56 +522,16 @@ void WallpaperPanel::create() {
     m_wallhavenSortSelect->setSelectedIndex(0);
   }
 
-  // Pagination buttons (Wallhaven mode)
-  toolbar->addChild(
-      ui::button({
-          .out = &m_wallhavenPrevButton,
-          .glyph = "chevron-left",
-          .glyphSize = Style::fontSizeBody * scale,
-          .variant = ButtonVariant::Secondary,
-          .minWidth = Style::controlHeightSm * scale,
-          .minHeight = Style::controlHeightSm * scale,
-          .padding = Style::spaceXs * scale,
-          .radius = Style::scaledRadiusMd(scale),
-          .visible = false,
-          .onClick = [this]() {
-            if (m_wallhavenPage > 1) {
-              wallhavenLoadPage(m_wallhavenPage - 1);
-            }
-          },
-      })
-  );
+  toolbar->addChild(std::move(wallhavenRow));
 
-  toolbar->addChild(
-      ui::label({
-          .out = &m_wallhavenPageLabel,
-          .text = "",
-          .fontSize = Style::fontSizeCaption * scale,
-          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-          .visible = false,
-      })
-  );
+  // ── Local-only controls sub-row (collapsed when hidden) ─────────────
+  auto localRow = ui::row({
+      .out = &m_localControlsRow,
+      .align = FlexAlign::Center,
+      .gap = Style::spaceSm * scale,
+  });
 
-  toolbar->addChild(
-      ui::button({
-          .out = &m_wallhavenNextButton,
-          .glyph = "chevron-right",
-          .glyphSize = Style::fontSizeBody * scale,
-          .variant = ButtonVariant::Secondary,
-          .minWidth = Style::controlHeightSm * scale,
-          .minHeight = Style::controlHeightSm * scale,
-          .padding = Style::spaceXs * scale,
-          .radius = Style::scaledRadiusMd(scale),
-          .visible = false,
-          .onClick = [this]() {
-            if (m_wallhavenPage < m_wallhavenLastPage) {
-              wallhavenLoadPage(m_wallhavenPage + 1);
-            }
-          },
-      })
-  );
-
-  toolbar->addChild(
+  localRow->addChild(
       ui::input({
           .out = &m_filterInput,
           .placeholder = i18n::tr("wallpaper.panel.filter-placeholder"),
@@ -587,7 +564,7 @@ void WallpaperPanel::create() {
       })
   );
 
-  toolbar->addChild(
+  localRow->addChild(
       ui::button({
           .out = &m_backButton,
           .glyph = "arrow-big-up",
@@ -600,6 +577,8 @@ void WallpaperPanel::create() {
           .onClick = [this]() { navigateUp(); },
       })
   );
+
+  toolbar->addChild(std::move(localRow));
 
   toolbar->addChild(ui::spacer());
 
@@ -720,6 +699,8 @@ void WallpaperPanel::create() {
 
   root->addChild(std::move(toolbar));
 
+
+
   const float favoritesControlHeight = Style::controlHeightSm * scale;
   const float favoritesLabelFontSize = Style::fontSizeCaption * scale;
 
@@ -803,6 +784,55 @@ void WallpaperPanel::create() {
   );
 
   favoritesOptions->addChild(ui::spacer());
+
+  // ── Wallhaven pagination (inline, beside M3 Content) ────────────────
+  favoritesOptions->addChild(
+      ui::button({
+          .out = &m_wallhavenPrevButton,
+          .glyph = "chevron-left",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Secondary,
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .radius = Style::scaledRadiusMd(scale),
+          .visible = false,
+          .onClick = [this]() {
+            if (m_wallhavenPage > 1) {
+              wallhavenLoadPage(m_wallhavenPage - 1);
+            }
+          },
+      })
+  );
+
+  favoritesOptions->addChild(
+      ui::label({
+          .out = &m_wallhavenPageLabel,
+          .text = "",
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+          .visible = false,
+      })
+  );
+
+  favoritesOptions->addChild(
+      ui::button({
+          .out = &m_wallhavenNextButton,
+          .glyph = "chevron-right",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Secondary,
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .radius = Style::scaledRadiusMd(scale),
+          .visible = false,
+          .onClick = [this]() {
+            if (m_wallhavenPage < m_wallhavenLastPage) {
+              wallhavenLoadPage(m_wallhavenPage + 1);
+            }
+          },
+      })
+  );
 
   favoritesOptions->addChild(
       ui::segmented({
@@ -2170,17 +2200,22 @@ void WallpaperPanel::wallhavenDownloadAndApply(const WallpaperEntry& entry) {
 
   kLog.info("Wallhaven downloading {} -> {}", match->fullUrl, destPath.string());
 
-  // Show loading state
-  if (m_wallhavenPageLabel != nullptr) {
-    m_wallhavenPageLabel->setText("Downloading…");
+  // Show "Downloading…" on the tile's own name instead of the top bar.
+  WallpaperTile* targetTile = (m_adapter != nullptr) ? m_adapter->findTileForEntry(entry) : nullptr;
+  if (targetTile != nullptr) {
+    targetTile->setLabelOverride("Downloading…");
   }
+  m_dirty = true;
+  PanelManager::instance().refresh();
 
   m_wallhavenClient->downloadWallpaper(match->fullUrl, destPath,
-      [this, destPath, filename](bool success) {
+      [this, entry, destPath, filename](bool success) {
     if (!success) {
       kLog.error("Wallhaven download failed for {}", filename);
-      if (m_wallhavenPageLabel != nullptr) {
-        m_wallhavenPageLabel->setText("Download failed");
+      if (m_adapter != nullptr) {
+        if (auto* tile = m_adapter->findTileForEntry(entry)) {
+          tile->setLabelOverride("Download failed");
+        }
       }
       m_dirty = true;
       PanelManager::instance().refresh();
@@ -2188,6 +2223,13 @@ void WallpaperPanel::wallhavenDownloadAndApply(const WallpaperEntry& entry) {
     }
 
     kLog.info("Wallhaven downloaded {} successfully", destPath.string());
+
+    // Clear the override so the tile shows its normal name again.
+    if (m_adapter != nullptr) {
+      if (auto* tile = m_adapter->findTileForEntry(entry)) {
+        tile->setLabelOverride("");
+      }
+    }
 
     // Apply the wallpaper
     applyWallpaperPath(destPath.string(), nullptr);
@@ -2197,7 +2239,6 @@ void WallpaperPanel::wallhavenDownloadAndApply(const WallpaperEntry& entry) {
       m_scanner->invalidate();
     }
 
-    // Restore page label
     syncWallhavenChrome();
     m_dirty = true;
     PanelManager::instance().refresh();
@@ -2207,31 +2248,27 @@ void WallpaperPanel::wallhavenDownloadAndApply(const WallpaperEntry& entry) {
 void WallpaperPanel::syncWallhavenChrome() {
   const bool isWallhaven = (m_sourceMode == SourceMode::Wallhaven);
 
-  // Toggle Wallhaven-specific controls
-  if (m_wallhavenSearchInput != nullptr) m_wallhavenSearchInput->setVisible(isWallhaven);
-  if (m_wallhavenSearchButton != nullptr) m_wallhavenSearchButton->setVisible(isWallhaven);
-  if (m_wallhavenSortSelect != nullptr) m_wallhavenSortSelect->setVisible(isWallhaven);
-  if (m_wallhavenPrevButton != nullptr) m_wallhavenPrevButton->setVisible(isWallhaven);
-  if (m_wallhavenPageLabel != nullptr) m_wallhavenPageLabel->setVisible(isWallhaven);
-  if (m_wallhavenNextButton != nullptr) m_wallhavenNextButton->setVisible(isWallhaven);
+  // Toggle sub-row containers
+  if (m_wallhavenControlsRow != nullptr) m_wallhavenControlsRow->setVisible(isWallhaven);
+  if (m_localControlsRow != nullptr) m_localControlsRow->setVisible(!isWallhaven);
 
-  // Update pagination button states
+  // Toggle inline pagination widgets
   if (m_wallhavenPrevButton != nullptr) {
+    m_wallhavenPrevButton->setVisible(isWallhaven);
     m_wallhavenPrevButton->setEnabled(m_wallhavenPage > 1 && !m_wallhavenSearching);
   }
+  if (m_wallhavenPageLabel != nullptr) m_wallhavenPageLabel->setVisible(isWallhaven);
   if (m_wallhavenNextButton != nullptr) {
+    m_wallhavenNextButton->setVisible(isWallhaven);
     m_wallhavenNextButton->setEnabled(m_wallhavenPage < m_wallhavenLastPage && !m_wallhavenSearching);
   }
 
-  // Hide local-only controls in Wallhaven mode
+  // Hide local-only controls that live outside the sub-row in Wallhaven mode
   if (isWallhaven) {
-    if (m_filterInput != nullptr) m_filterInput->setVisible(false);
     if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(false);
     if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(false);
-    if (m_backButton != nullptr) m_backButton->setVisible(false);
     if (m_sortButton != nullptr) m_sortButton->setVisible(false);
   } else {
-    if (m_filterInput != nullptr) m_filterInput->setVisible(true);
     if (m_flattenToggle != nullptr) m_flattenToggle->setVisible(true);
     if (m_flattenLabel != nullptr) m_flattenLabel->setVisible(true);
     if (m_backButton != nullptr) m_backButton->setVisible(true);

@@ -306,7 +306,11 @@ void WallpaperTile::setEntry(const WallpaperEntry& entry, Renderer& renderer) {
   m_missingFile = false;
   setVisible(true);
 
-  m_label->setText(entry.name);
+  if (!m_labelOverride.empty()) {
+    m_label->setText(m_labelOverride);
+  } else {
+    m_label->setText(entry.name);
+  }
 
   if (m_starGlyph != nullptr) {
     m_starGlyph->setVisible(!entry.isDir);
@@ -528,6 +532,17 @@ void WallpaperTile::setStarHovered(bool hovered) {
   }
   m_starHoveredVisual = hovered;
   applyStarVisualState();
+}
+
+void WallpaperTile::setLabelOverride(const std::string& text) {
+  m_labelOverride = text;
+  if (m_label != nullptr) {
+    if (!m_labelOverride.empty()) {
+      m_label->setText(m_labelOverride);
+    } else if (m_hasEntry) {
+      m_label->setText(m_entry.name);
+    }
+  }
 }
 
 void WallpaperTile::applyThumbScale(float scale) {

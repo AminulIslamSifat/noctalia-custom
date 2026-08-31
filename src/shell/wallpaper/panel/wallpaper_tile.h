@@ -53,6 +53,8 @@ public:
   void setHoveredVisual(bool hovered);
   void setFavoriteState(bool favorited, std::optional<ThemeMode> themeModeBadge);
   void setStarHovered(bool hovered);
+  // Override the displayed label text (e.g. "Downloading…"). Pass empty string to restore original entry name.
+  void setLabelOverride(const std::string& text);
   void setOnStarClick(std::function<void(const WallpaperEntry&)> callback);
   void setOnTileClick(ClickCallback callback);
   void setOnTileMotion(HoverCallback callback);
@@ -100,6 +102,7 @@ private:
   bool m_starHoveredVisual = false;
   std::optional<ThemeMode> m_themeModeBadge;
   bool m_missingFile = false;
+  std::string m_labelOverride;
   bool m_loadingThumbnail = false;
   std::string m_thumbPath;
   int m_thumbTargetPx = 0;
