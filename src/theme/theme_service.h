@@ -48,6 +48,8 @@ namespace noctalia::theme {
     // and switches palette source to custom.
     [[nodiscard]] bool saveWallpaperPaletteAsCustom(std::string* paletteNameOut, std::string* errorOut = nullptr);
 
+    [[nodiscard]] HttpClient& httpClient() noexcept { return m_httpClient; }
+
   private:
     void resolveAndSet(bool animate);
     // Decodes + generates the wallpaper palette, memoized on (path, mtime, scheme)

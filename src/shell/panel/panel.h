@@ -131,6 +131,10 @@ public:
   }
 
   virtual void setAnimationManager(AnimationManager* mgr) noexcept { m_animations = mgr; }
+  // Called each frame during detached reveal/hide animation with the current
+  // progress (0 = fully hidden, 1 = fully revealed). Panels that manage their
+  // own blur region can use this to sync blur visibility with the animation.
+  virtual void onRevealProgress(float progress) { (void)progress; }
 
 protected:
   [[nodiscard]] float scaled(float value) const noexcept { return value * m_contentScale; }

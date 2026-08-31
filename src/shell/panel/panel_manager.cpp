@@ -1152,6 +1152,14 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
       if (hasFocusGrab && wantsOutsideDismiss) {
         activateFocusGrab();
       }
+      // Warp cursor to panel center so keyboard input routes correctly.
+      // Without this, Hyprland may not set lastKeyboardSurface to the panel
+      // when the pointer is outside the panel area at open time.
+      if (m_platform != nullptr) {
+        const int centerX = visualX + static_cast<int>(panelWidth) / 2;
+        const int centerY = visualY + static_cast<int>(panelHeight) / 2;
+        m_platform->warpCursorTo(centerX, centerY);
+      }
       if (attachedKeyboardPlan.relaxed.has_value()) {
         const std::uint64_t gen = m_destroyGeneration;
         const LayerShellKeyboard relaxed = *attachedKeyboardPlan.relaxed;
@@ -1241,6 +1249,14 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   // Activate outside-click dismissal (focus grab or click shield).
   if (hasFocusGrab && wantsOutsideDismiss) {
     activateFocusGrab();
+  }
+  // Warp cursor to panel center so keyboard input routes correctly.
+  // Without this, Hyprland may not set lastKeyboardSurface to the panel
+  // when the pointer is outside the panel area at open time.
+  if (m_platform != nullptr) {
+    const int centerX = detachedPanelInputRect.x + detachedPanelInputRect.width / 2;
+    const int centerY = detachedPanelInputRect.y + detachedPanelInputRect.height / 2;
+    m_platform->warpCursorTo(centerX, centerY);
   }
   if (keyboardPlan.relaxed.has_value()) {
     const std::uint64_t gen = m_destroyGeneration;
@@ -1392,6 +1408,7 @@ void PanelManager::destroyPanel() {
     m_activePopup = nullptr;
   }
   if (m_activePanel != nullptr) {
+    m_activePanel->setSurface(nullptr);
     m_activePanel->onClose();
   }
   m_bgNode = nullptr;
@@ -1462,6 +1479,7 @@ void PanelManager::togglePanel(const std::string& panelId, PanelOpenRequest requ
         openPanel(panelId, request);
         return;
       }
+      m_activePanel->setSurface(m_surface.get());
       m_activePanel->onOpen(request.context);
       refresh();
       return;
@@ -1998,7 +2016,10 @@ void PanelManager::applyAttachedReveal(float progress) {
   m_attachedRevealProgress = std::clamp(progress, 0.0F, 1.0F);
   if (!m_attachedToBar || m_attachedRevealClipNode == nullptr || m_sceneRoot == nullptr) {
     if (m_attachedToBar && m_surface != nullptr) {
-      m_surface->clearBlurRegion();
+      // Keep the blur effect protocol object alive across the animation.
+      // Destroying it mid-close causes a visible flicker because the
+      // compositor needs frames to recreate the effect.
+      m_surface->setBlurRegion({});
     }
     return;
   }
@@ -2048,19 +2069,30 @@ void PanelManager::applyAttachedReveal(float progress) {
   }
 
   publishAttachedPanelGeometry(m_attachedRevealProgress);
-  const int bodyX = m_panelInsetX + static_cast<int>(std::lround(contentX));
-  const int bodyY = m_panelInsetY + static_cast<int>(std::lround(contentY));
-  applyPanelCompositorBlur(
-      bodyX, bodyY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight), 0, 0,
-      static_cast<int>(std::lround(w)), static_cast<int>(std::lround(h))
-  );
+
+  // Always apply blur during attached reveal — the slide animation naturally
+  // moves the blur region off-screen with the content. Only clear when fully
+  // hidden (progress == 0) to keep protocol object alive without flicker.
+  if (m_attachedRevealProgress <= 0.0F) {
+    if (m_surface != nullptr) {
+      m_surface->setBlurRegion({});
+    }
+  } else {
+    const int bodyX = m_panelInsetX + static_cast<int>(std::lround(contentX));
+    const int bodyY = m_panelInsetY + static_cast<int>(std::lround(contentY));
+    applyPanelCompositorBlur(
+        bodyX, bodyY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight), 0, 0,
+        static_cast<int>(std::lround(w)), static_cast<int>(std::lround(h))
+    );
+  }
 }
 
 void PanelManager::applyDetachedReveal(float progress) {
   m_detachedRevealProgress = std::clamp(progress, 0.0F, 1.0F);
   if (m_attachedToBar || m_sceneRoot == nullptr) {
     if (!m_attachedToBar && m_surface != nullptr) {
-      m_surface->clearBlurRegion();
+      // Keep the blur effect protocol object alive across the animation.
+      m_surface->setBlurRegion({});
     }
     return;
   }
@@ -2098,6 +2130,9 @@ void PanelManager::applyDetachedReveal(float progress) {
 
   if (m_contentNode != nullptr) {
     m_contentNode->setOpacity(panelRevealContentOpacity(m_detachedRevealProgress));
+  }
+  if (m_activePanel != nullptr) {
+    m_activePanel->onRevealProgress(m_detachedRevealProgress);
   }
   // Panels with hasDecoration()==false manage their own blur region (e.g. concave shapes).
   // Skip the panel manager's rectangular blur to avoid overwriting the panel's custom shape.
@@ -2225,7 +2260,8 @@ void PanelManager::applyPanelCompositorBlur(
     if (blurTraceEnabled()) {
       kLog.debug("blur-trace panel-blur-clear reason=empty-input");
     }
-    m_surface->clearBlurRegion();
+    // Keep the blur effect protocol object alive across the animation.
+    m_surface->setBlurRegion({});
     return;
   }
 
@@ -2239,7 +2275,8 @@ void PanelManager::applyPanelCompositorBlur(
     if (blurTraceEnabled()) {
       kLog.debug("blur-trace panel-blur-clear reason=empty-shape");
     }
-    m_surface->clearBlurRegion();
+    // Keep the blur effect protocol object alive across the animation.
+    m_surface->setBlurRegion({});
     return;
   }
 
@@ -2261,7 +2298,8 @@ void PanelManager::applyPanelCompositorBlur(
     if (blurTraceEnabled()) {
       kLog.debug("blur-trace panel-blur-clear reason=empty-clipped");
     }
-    m_surface->clearBlurRegion();
+    // Keep the blur effect protocol object alive across the animation.
+    m_surface->setBlurRegion({});
     return;
   }
 
@@ -2499,6 +2537,7 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
         m_attachedToBar ? m_attachedBackgroundOpacity : shell::panel_surface::backgroundOpacity(m_config);
     m_activePanel->setPanelCardOpacity(shell::panel_surface::cardOpacity(m_config, panelBackgroundOpacity));
     m_activePanel->create();
+    m_activePanel->setSurface(m_surface.get());
     m_activePanel->onOpen(m_pendingOpenContext);
     m_pendingOpenContext.clear();
     if (m_activePanel->root() != nullptr) {
@@ -2796,6 +2835,7 @@ void PanelManager::registerIpc(IpcService& ipc) {
 
         if (isOpen() && !m_closing && m_activePanelId == panelId) {
           if (!context.empty() && m_activePanel != nullptr) {
+            m_activePanel->setSurface(m_surface.get());
             m_activePanel->onOpen(context);
             refresh();
           }

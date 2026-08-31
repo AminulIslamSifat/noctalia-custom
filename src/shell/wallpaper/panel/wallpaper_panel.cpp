@@ -1,6 +1,7 @@
 #include "shell/wallpaper/panel/wallpaper_panel.h"
 
 #include "config/config_service.h"
+#include "net/http_client.h"
 #include "core/input/keybind_matcher.h"
 #include "core/log.h"
 #include "core/random.h"
@@ -369,6 +370,9 @@ WallpaperPanel::WallpaperPanel(
     noctalia::theme::ThemeService* themeService
 )
     : m_wayland(wayland), m_config(config), m_thumbnails(thumbnails), m_scanner(scanner), m_themeService(themeService) {
+  if (m_themeService != nullptr) {
+    m_wallhavenClient = std::make_unique<wallhaven::Client>(m_themeService->httpClient());
+  }
   if (m_config != nullptr) {
     m_flatten = m_config->stateBool("wallpaper_panel", "flatten").value_or(false);
     if (const std::optional<std::string> sort = m_config->stateString("wallpaper_panel", "sort")) {
@@ -413,6 +417,139 @@ void WallpaperPanel::create() {
           .fontSize = Style::fontSizeTitle * scale,
           .fontWeight = FontWeight::Bold,
           .color = colorSpecFromRole(ColorRole::Primary),
+      })
+  );
+
+  // ── Source selector (Local / Wallhaven) ──────────────────────────────
+  toolbar->addChild(
+      ui::select({
+          .out = &m_sourceSelect,
+          .fontSize = Style::fontSizeBody * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .onSelectionChanged =
+              [this](std::size_t idx, std::string_view) {
+                switchSource(idx == 0 ? SourceMode::Local : SourceMode::Wallhaven);
+              },
+          .configure = [scale](Select& select) { select.setMinWidth(120.0F * scale); },
+      })
+  );
+  if (m_sourceSelect != nullptr) {
+    m_sourceSelect->setOptions({"Local", "Wallhaven"});
+    m_sourceSelect->setSelectedIndex(0);
+  }
+
+  // ── Wallhaven search bar (hidden in Local mode) ─────────────────────
+  toolbar->addChild(
+      ui::input({
+          .out = &m_wallhavenSearchInput,
+          .placeholder = "Search Wallhaven…",
+          .fontSize = Style::fontSizeBody * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .horizontalPadding = Style::spaceMd * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .width = 200.0F * scale,
+          .height = 0.0F,
+          .visible = false,
+          .onChange = [this](const std::string& text) { m_wallhavenQuery = text; },
+          .onKeyEvent =
+              [this](std::uint32_t sym, std::uint32_t modifiers) {
+                if (sym == 36 && !modifiers) { // Enter key
+                  wallhavenSearch();
+                  return true;
+                }
+                return handleKeyEvent(sym, modifiers);
+              },
+      })
+  );
+
+  toolbar->addChild(
+      ui::button({
+          .out = &m_wallhavenSearchButton,
+          .glyph = "search",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Default,
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .radius = Style::scaledRadiusMd(scale),
+          .visible = false,
+          .onClick = [this]() { wallhavenSearch(); },
+      })
+  );
+
+  toolbar->addChild(
+      ui::select({
+          .out = &m_wallhavenSortSelect,
+          .fontSize = Style::fontSizeBody * scale,
+          .controlHeight = Style::controlHeightSm * scale,
+          .surfaceOpacity = panelCardOpacity(),
+          .visible = false,
+          .onSelectionChanged =
+              [this](std::size_t idx, std::string_view) {
+                static constexpr wallhaven::Sorting kSortings[] = {
+                    wallhaven::Sorting::DateAdded, wallhaven::Sorting::Relevance,
+                    wallhaven::Sorting::Views,     wallhaven::Sorting::Favorites,
+                    wallhaven::Sorting::Toplist,   wallhaven::Sorting::Random,
+                };
+                if (idx < std::size(kSortings)) {
+                  m_wallhavenSorting = kSortings[idx];
+                }
+              },
+          .configure = [scale](Select& select) { select.setMinWidth(110.0F * scale); },
+      })
+  );
+  if (m_wallhavenSortSelect != nullptr) {
+    m_wallhavenSortSelect->setOptions({"Date", "Relevance", "Views", "Favorites", "Toplist", "Random"});
+    m_wallhavenSortSelect->setSelectedIndex(0);
+  }
+
+  // Pagination buttons (Wallhaven mode)
+  toolbar->addChild(
+      ui::button({
+          .out = &m_wallhavenPrevButton,
+          .glyph = "chevron-left",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Secondary,
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .radius = Style::scaledRadiusMd(scale),
+          .visible = false,
+          .onClick = [this]() {
+            if (m_wallhavenPage > 1) {
+              wallhavenLoadPage(m_wallhavenPage - 1);
+            }
+          },
+      })
+  );
+
+  toolbar->addChild(
+      ui::label({
+          .out = &m_wallhavenPageLabel,
+          .text = "",
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+          .visible = false,
+      })
+  );
+
+  toolbar->addChild(
+      ui::button({
+          .out = &m_wallhavenNextButton,
+          .glyph = "chevron-right",
+          .glyphSize = Style::fontSizeBody * scale,
+          .variant = ButtonVariant::Secondary,
+          .minWidth = Style::controlHeightSm * scale,
+          .minHeight = Style::controlHeightSm * scale,
+          .padding = Style::spaceXs * scale,
+          .radius = Style::scaledRadiusMd(scale),
+          .visible = false,
+          .onClick = [this]() {
+            if (m_wallhavenPage < m_wallhavenLastPage) {
+              wallhavenLoadPage(m_wallhavenPage + 1);
+            }
+          },
       })
   );
 

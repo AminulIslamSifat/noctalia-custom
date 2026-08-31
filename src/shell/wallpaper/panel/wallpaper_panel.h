@@ -5,6 +5,7 @@
 #include "render/core/thumbnail_service.h"
 #include "shell/panel/panel.h"
 #include "shell/wallpaper/panel/wallpaper_scanner.h"
+#include "shell/wallpaper/wallhaven_client.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,7 @@
 class Button;
 class ConfigService;
 class Flex;
+class HttpClient;
 class Input;
 class Label;
 class Segmented;
@@ -41,6 +43,11 @@ public:
     DateAsc,
     DateDesc,
     Random,
+  };
+
+  enum class SourceMode : std::uint8_t {
+    Local,
+    Wallhaven,
   };
 
   WallpaperPanel(
@@ -106,6 +113,15 @@ private:
   [[nodiscard]] static std::string_view sortModeGlyph(SortMode mode);
   [[nodiscard]] static const char* sortModeTooltipKey(SortMode mode);
   void applyColorWallpaper();
+
+  // ── Wallhaven ────────────────────────────────────────────────────────
+  void switchSource(SourceMode mode);
+  void wallhavenSearch();
+  void wallhavenLoadPage(std::size_t page);
+  void wallhavenDownloadAndApply(const WallpaperEntry& entry);
+  void syncWallhavenChrome();
+  [[nodiscard]] std::filesystem::path wallhavenSaveDirectory() const;
+
   void rebindGrid(bool resetScroll = false);
   void resetSelection();
   [[nodiscard]] bool hasVisibleSelection() const;
@@ -124,6 +140,7 @@ private:
   ThumbnailService* m_thumbnails = nullptr;
   WallpaperScanner* m_scanner = nullptr;
   noctalia::theme::ThemeService* m_themeService = nullptr;
+  std::unique_ptr<wallhaven::Client> m_wallhavenClient;
 
   // UI nodes (owned by the root flex tree).
   Flex* m_rootLayout = nullptr;
@@ -142,6 +159,13 @@ private:
   Button* m_refreshButton = nullptr;
   Button* m_colorButton = nullptr;
   Button* m_closeButton = nullptr;
+  Select* m_sourceSelect = nullptr;
+  Input* m_wallhavenSearchInput = nullptr;
+  Select* m_wallhavenSortSelect = nullptr;
+  Button* m_wallhavenSearchButton = nullptr;
+  Button* m_wallhavenPrevButton = nullptr;
+  Button* m_wallhavenNextButton = nullptr;
+  Label* m_wallhavenPageLabel = nullptr;
   VirtualGridView* m_grid = nullptr;
   Flex* m_loadingBox = nullptr;
   Spinner* m_spinner = nullptr;
@@ -179,4 +203,14 @@ private:
   bool m_dirty = false;
   bool m_thumbnailRefreshPending = false;
   ThumbnailService::Subscription m_thumbnailPendingSub;
+
+  // ── Wallhaven state ──────────────────────────────────────────────────
+  SourceMode m_sourceMode = SourceMode::Local;
+  std::string m_wallhavenQuery;
+  wallhaven::Sorting m_wallhavenSorting = wallhaven::Sorting::DateAdded;
+  std::size_t m_wallhavenPage = 1;
+  std::size_t m_wallhavenLastPage = 1;
+  bool m_wallhavenSearching = false;
+  std::vector<WallpaperEntry> m_wallhavenEntries; // synthetic entries from API results
+  std::vector<wallhaven::SearchResult> m_wallhavenResults; // raw results for download URLs
 };

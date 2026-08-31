@@ -1436,6 +1436,14 @@ void LauncherPanel::applyConcaveBlur() {
   if (m_surface == nullptr || m_bgNode == nullptr) {
     return;
   }
+  // Sync blur visibility with the reveal/hide animation. Below this threshold
+  // the panel is mostly clipped away — set an empty region to keep the protocol
+  // object alive without rendering a visible blur rectangle.
+  constexpr float kBlurVisibleProgress = 0.85F;
+  if (m_revealProgress < kBlurVisibleProgress) {
+    m_surface->setBlurRegion({});
+    return;
+  }
   float absX = 0.0F;
   float absY = 0.0F;
   Node::absolutePosition(m_bgNode, absX, absY);
@@ -1512,11 +1520,25 @@ void LauncherPanel::onOpen(std::string_view context) {
     m_grid->scrollView().setScrollOffset(0.0F);
   }
   onInputChanged(initialValue);
+
+
+}
+
+void LauncherPanel::onRevealProgress(float progress) {
+  m_revealProgress = progress;
+}
+
+void LauncherPanel::onFrameTick(float deltaMs) {
+  Panel::onFrameTick(deltaMs);
+  applyConcaveBlur();
 }
 
 void LauncherPanel::onClose() {
+  // Keep the blur effect protocol object alive — set empty region instead of
+  // destroying it, matching the edge slider pattern. This avoids flicker when
+  // the compositor tears down and recreates the effect mid-animation.
   if (m_surface != nullptr) {
-    m_surface->clearBlurRegion();
+    m_surface->setBlurRegion({});
   }
   if (m_actionsMenu != nullptr && m_actionsMenu->isOpen()) {
     m_actionsMenu->close();

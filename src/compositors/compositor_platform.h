@@ -32,6 +32,7 @@ namespace compositors::kde {
 }
 
 namespace compositors::hyprland {
+  class HyprlandRuntime;
   class HyprlandToplevelMapping;
 }
 
@@ -177,6 +178,9 @@ public:
 
   [[nodiscard]] bool requestSessionExit() const;
   [[nodiscard]] bool setOutputPower(bool on) const;
+
+  // Warp cursor to absolute screen coordinates via compositor IPC (Hyprland only).
+  void warpCursorTo(int x, int y) const;
 
   [[nodiscard]] bool tracksOverviewState() const noexcept;
   [[nodiscard]] bool hasOverviewState() const noexcept;

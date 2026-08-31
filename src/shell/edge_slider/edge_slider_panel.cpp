@@ -93,7 +93,7 @@ void EdgeSliderPanel::create() {
       })
   ));
   m_bgNode->setZIndex(0);
-  m_bgNode->setFill(colorSpecFromRole(ColorRole::Surface, 0.88F));
+  m_bgNode->setFill(colorSpecFromRole(ColorRole::Surface, 0.45F));
 
   // Content column centered inside slideRoot
   auto col = ui::column({
@@ -276,9 +276,13 @@ void EdgeSliderPanel::syncSlideTransform() {
 
 void EdgeSliderPanel::applyBlur() {
   if (m_surface == nullptr || m_bgNode == nullptr) return;
-  // Same logic as applyDockCompositorBlur
+  // Keep the blur effect protocol object alive across the entire open/close
+  // cycle. Destroying and recreating it mid-animation causes a visible flicker
+  // because the compositor needs frames to activate the new effect. Instead,
+  // set an empty region when below the visibility threshold — the compositor
+  // treats this as "no blur" without tearing down the effect object.
   if (m_hideOpacity < kBlurVisibleOpacity) {
-    m_surface->clearBlurRegion();
+    m_surface->setBlurRegion({});
     return;
   }
   float absX = 0.0F;

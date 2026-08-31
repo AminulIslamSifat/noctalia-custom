@@ -24,3 +24,5 @@ Thumbs.db
 result/
 result
 result-*
+*.bak
+.editor_tools_backups/

@@ -74,6 +74,8 @@ private:
   };
 
   void onPanelCardOpacityChanged(float opacity) override;
+  void onFrameTick(float deltaMs) override;
+  void onRevealProgress(float progress) override;
   void doLayout(Renderer& renderer, float width, float height) override;
   void onInputChanged(const std::string& text);
   void setQuery(std::string query);
@@ -161,4 +163,5 @@ private:
   void applyConcaveBlur();
   shell::dock::DockConcaveShape m_concave{};
   Box* m_bgNode = nullptr;
+  float m_revealProgress = 0.0F;
 };

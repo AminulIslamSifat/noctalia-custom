@@ -1591,6 +1591,17 @@ bool CompositorPlatform::setOutputPower(bool on) const {
   return m_outputPowerBackend->setOutputPower(m_wayland, on);
 }
 
+void CompositorPlatform::warpCursorTo(int x, int y) const {
+  if (m_runtimeRegistry == nullptr) {
+    return;
+  }
+  auto& runtime = m_runtimeRegistry->hyprland();
+  if (!runtime.available()) {
+    return;
+  }
+  (void)runtime.request(std::format("dispatch movecursor {} {}", x, y));
+}
+
 bool CompositorPlatform::tracksOverviewState() const noexcept {
   return m_workspaceMetadataBackend != nullptr && m_workspaceMetadataBackend->canTrackOverviewState();
 }
