@@ -2080,8 +2080,8 @@ void WallpaperPanel::wallhavenLoadPage(std::size_t page) {
       entry.name = sr.id + " (" + sr.resolution + ")";
       entry.absPath = cachedThumb; // Will point to local cached file
       entry.isDir = false;
-      entry.modifiedTime = 0;
-      entry.fileSize = sr.fileSize;
+      entry.mtime = std::filesystem::file_time_type{};
+      entry.hasMtime = false;
       m_wallhavenEntries.push_back(std::move(entry));
 
       // Check if already cached
@@ -2247,6 +2247,4 @@ std::filesystem::path WallpaperPanel::wallhavenSaveDirectory() const {
   }
   // Fallback
   return std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") / "Pictures" / "Wallpapers";
-}
-
 }
